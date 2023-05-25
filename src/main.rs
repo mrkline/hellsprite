@@ -46,7 +46,7 @@ fn map_wad(wad: &Utf8Path) -> Result<Mmap> {
     Ok(mmap)
 }
 
-#[binrw]
+#[binread]
 struct Wadinfo {
     magic: [u8; 4],
     numlumps: u32,
@@ -64,15 +64,45 @@ fn go(args: Args) -> Result<()> {
         bail!("Bad magic: {magic}");
     }
     let dir = read_directory(curse, &info)?;
-    info!("{} lumps:", info.numlumps);
-    for lump in &dir {
-        info!("  {}", doomstr(&lump.name));
+    debug!("{} lumps", info.numlumps);
+    /*
+    if max_level() == LevelFilter::Trace {
+        for lump in &dir {
+            trace!("  {}", doomstr(&lump.name));
+        }
+    }
+    */
+
+    // TODO Palette loading
+
+    let sprites = dir
+        .iter()
+        .skip_while(|l| doomstr(&l.name) != "S_START")
+        .skip(1)
+        .take_while(|l| doomstr(&l.name) != "S_END");
+
+    info!("Sprites:");
+    for s in sprites {
+        info!("  {}", doomstr(&s.name));
+        save_sprite(curse, s)?;
+    }
+
+    let flats = dir
+        .iter()
+        .skip_while(|l| doomstr(&l.name) != "F_START")
+        .skip(1)
+        .take_while(|l| doomstr(&l.name) != "F_END");
+
+    info!("Flats:");
+    for f in flats {
+        info!("  {}", doomstr(&f.name));
+        save_sprite(curse, f)?;
     }
 
     Ok(())
 }
 
-#[binrw]
+#[binread]
 struct Filelump {
     filepos: u32,
     size: u32,
@@ -89,13 +119,78 @@ impl fmt::Debug for Filelump {
     }
 }
 
-fn read_directory(c: &mut std::io::Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
+fn read_directory(c: &mut Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
     c.seek(SeekFrom::Start(wi.infotableofs as u64))?;
     let mut lumps = Vec::with_capacity(wi.numlumps as usize);
     for _i in 0..wi.numlumps {
         lumps.push(c.read_le()?);
     }
     Ok(lumps)
+}
+
+#[derive(BinRead, Debug)]
+struct PatchHeader {
+    width: u16,
+    height: u16,
+    leftoffset: i16,
+    _topoffset: i16,
+    #[br(count = width)]
+    columnofs: Vec<u32>,
+}
+
+#[binrw]
+struct Post {
+    topdelta: u8,
+    #[br(pad_after = 1)]
+    length: u8,
+}
+
+fn save_sprite(c: &mut Cursor<Mmap>, sprite: &Filelump) -> Result<()> {
+    let base = sprite.filepos as u64;
+    c.seek(SeekFrom::Start(base))?;
+
+    let header: PatchHeader = c.read_le()?;
+    trace!("    {header:?}");
+
+    // TODO: Glorious palette-indexed PNG
+    let mut img = image::GrayImage::new(header.width as u32, header.height as u32);
+
+    for (x, col) in header.columnofs.iter().enumerate() {
+        // trace!("      column {x}:");
+        c.seek(SeekFrom::Start(base + *col as u64))?;
+        loop {
+            // trace!("At {}", c.position());
+            let post: Post = c.read_le()?;
+            if post.topdelta == 255 {
+                // trace!("        EOC");
+                break;
+            }
+            /*
+            trace!(
+                "        [{}..{}]",
+                post.topdelta,
+                post.topdelta as u32 + post.length as u32
+            );
+            */
+            for dy in 0..post.length {
+                let px = read_u8(c)?;
+                // trace!("          [{}] = {px}", post.topdelta + dy);
+                img.put_pixel(x as u32, (post.topdelta + dy) as u32, [px].into());
+            }
+            let _pad = read_u8(c)?;
+        }
+    }
+
+    let outname = doomstr(&sprite.name).to_owned() + ".png";
+    img.save(outname)?;
+
+    Ok(())
+}
+
+fn read_u8(c: &mut Cursor<Mmap>) -> Result<u8> {
+    let mut buf = [0; 1];
+    c.read_exact(&mut buf)?;
+    Ok(buf[0])
 }
 
 fn main() {

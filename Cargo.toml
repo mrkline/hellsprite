@@ -11,6 +11,7 @@ atty = "0.2.14"
 binrw = "0.11.2"
 camino = "1.1.4"
 clap = { version = "4.3.0", features = ["derive"] }
+image = { version = "0.24", default_features = false, features = ["png"] }
 log = "0.4.17"
 memmap2 = "0.6.2"
 simplelog = "0.12.1"

@@ -15,6 +15,10 @@ struct Args {
     /// Where's all the data?
     wad: Utf8PathBuf,
 
+    /// Upscale image by 5x6 to fix VGA perpsective
+    #[clap(short='p', long)]
+    perspective_correct: bool,
+
     /// Verbosity (-v, -vv, -vvv, etc.)
     #[clap(short, long, action(ArgAction::Count))]
     verbose: u8,
@@ -93,14 +97,14 @@ fn go(args: Args) -> Result<()> {
     info!("Sprites:");
     for s in sprites {
         info!("  {}", s.name());
-        save_sprite(&wad, s, palette, used_colors)?;
+        save_sprite(&wad, s, args.perspective_correct, palette, used_colors)?;
     }
 
     let faces = dir.iter().filter(|l| l.name().starts_with("STF"));
     info!("Faces:");
     for f in faces {
         info!("  {}", f.name());
-        save_sprite(&wad, f, palette, used_colors)?;
+        save_sprite(&wad, f, args.perspective_correct, palette, used_colors)?;
     }
 
     // We can use these for transparency
@@ -166,6 +170,7 @@ struct PostHeader {
 fn save_sprite(
     wad: &[u8],
     sprite: &Filelump,
+    upsample: bool,
     palette: &[u8],
     used_colors: &mut [bool],
 ) -> Result<()> {
@@ -209,10 +214,39 @@ fn save_sprite(
     }
 
     let outname = sprite.name().to_owned() + ".png";
+
+    let mut width = header.width as u32;
+    let mut height = header.height as u32;
+    if upsample {
+        // Do a dumb nearest-neighbor upscale at a 5:6 ratio to match the
+        // pixel aspect ratio Doom ran on.
+        width *= 5;
+        height *= 6;
+
+        let mut embiggened = vec![0; width as usize * height as usize];
+        let srcwidth = header.width as usize;
+        let srcheight = header.height as usize;
+        let dstwidth = width as usize;
+        for y in 0..srcheight {
+            for x in 0..srcwidth {
+                let src = pixels[x + y * srcwidth];
+                for dy in 0..6 {
+                    for dx in 0..5 {
+                        let dstx = x * 5 + dx;
+                        let dsty = y * 6 + dy;
+                        // trace!("({}, {}) -> ({}, {})", x, y, dstx, dsty);
+                        embiggened[dstx + dsty * dstwidth] = src;
+                    }
+                }
+            }
+        }
+        pixels = embiggened;
+    }
+
     let mut encoder = png::Encoder::new(
         BufWriter::new(fs::File::create(outname)?),
-        header.width as u32,
-        header.height as u32,
+        width,
+        height,
     );
     encoder.set_color(png::ColorType::Indexed);
     encoder.set_depth(png::BitDepth::Eight);

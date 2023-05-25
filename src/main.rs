@@ -65,13 +65,11 @@ fn go(args: Args) -> Result<()> {
     }
     let dir = read_directory(curse, &info)?;
     debug!("{} lumps", info.numlumps);
-    /*
     if max_level() == LevelFilter::Trace {
         for lump in &dir {
             trace!("  {}", doomstr(&lump.name));
         }
     }
-    */
 
     // TODO Palette loading
 
@@ -87,14 +85,9 @@ fn go(args: Args) -> Result<()> {
         save_sprite(curse, s)?;
     }
 
-    let flats = dir
-        .iter()
-        .skip_while(|l| doomstr(&l.name) != "F_START")
-        .skip(1)
-        .take_while(|l| doomstr(&l.name) != "F_END");
-
-    info!("Flats:");
-    for f in flats {
+    let faces = dir.iter().filter(|l| doomstr(&l.name).starts_with("STF"));
+    info!("Faces:");
+    for f in faces {
         info!("  {}", doomstr(&f.name));
         save_sprite(curse, f)?;
     }
@@ -132,7 +125,7 @@ fn read_directory(c: &mut Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
 struct PatchHeader {
     width: u16,
     height: u16,
-    leftoffset: i16,
+    _leftoffset: i16,
     _topoffset: i16,
     #[br(count = width)]
     columnofs: Vec<u32>,

@@ -41,6 +41,7 @@ fn map_wad(wad: &Utf8Path) -> Result<Mmap> {
     Ok(mmap)
 }
 
+// https://doomwiki.org/wiki/WAD
 #[binread]
 struct Wadinfo {
     magic: [u8; 4],
@@ -59,16 +60,15 @@ fn doomstr(d: &[u8]) -> &str {
 const TRANSPARENT: u8 = 251;
 
 fn go(args: Args) -> Result<()> {
-    let wad_map = map_wad(&args.wad)?;
-    let mut curse = Cursor::new(wad_map);
-    let curse = &mut curse;
+    let wad = map_wad(&args.wad)?;
 
+    let mut curse = Cursor::new(&wad);
     let info: Wadinfo = curse.read_le()?;
     let magic = doomstr(&info.magic);
     if magic != "IWAD" && magic != "PWAD" {
         bail!("Bad magic: {magic}");
     }
-    let dir = read_directory(curse, &info)?;
+    let dir = read_directory(&wad, &info)?;
     debug!("{} lumps", info.numlumps);
     if max_level() == LevelFilter::Trace {
         for lump in &dir {
@@ -80,7 +80,7 @@ fn go(args: Args) -> Result<()> {
         .iter()
         .find(|l| l.name() == "PLAYPAL")
         .expect("No palette");
-    let palette = read_palette(curse, palette)?;
+    let palette = read_palette(&wad, palette);
 
     let used_colors: &mut [bool] = &mut [false; 256];
 
@@ -93,14 +93,14 @@ fn go(args: Args) -> Result<()> {
     info!("Sprites:");
     for s in sprites {
         info!("  {}", s.name());
-        save_sprite(curse, s, &palette, used_colors)?;
+        save_sprite(&wad, s, palette, used_colors)?;
     }
 
     let faces = dir.iter().filter(|l| l.name().starts_with("STF"));
     info!("Faces:");
     for f in faces {
         info!("  {}", f.name());
-        save_sprite(curse, f, &palette, used_colors)?;
+        save_sprite(&wad, f, palette, used_colors)?;
     }
 
     // We can use these for transparency
@@ -128,8 +128,8 @@ impl Filelump {
     }
 }
 
-fn read_directory(c: &mut Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
-    c.seek(SeekFrom::Start(wi.infotableofs as u64))?;
+fn read_directory(wad: &[u8], wi: &Wadinfo) -> Result<Vec<Filelump>> {
+    let mut c = Cursor::new(&wad[wi.infotableofs as usize..]);
     let mut lumps = Vec::with_capacity(wi.numlumps as usize);
     for _i in 0..wi.numlumps {
         let lump = c.read_le()?;
@@ -138,13 +138,14 @@ fn read_directory(c: &mut Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
     Ok(lumps)
 }
 
-fn read_palette(c: &mut Cursor<Mmap>, lump: &Filelump) -> Result<Vec<u8>> {
-    c.seek(SeekFrom::Start(lump.filepos as u64))?;
-    let mut pal = vec![0; 256 * 3];
-    c.read_exact(&mut pal)?;
-    Ok(pal)
+fn read_palette<'a>(wad: &'a [u8], lump: &Filelump) -> &'a [u8] {
+    let len = 256 * 3;
+    let start = lump.filepos as usize;
+    let end = start + len;
+    &wad[start..end]
 }
 
+// https://doomwiki.org/wiki/Picture_format
 #[derive(BinRead, Debug)]
 struct PatchHeader {
     width: u16,
@@ -163,12 +164,14 @@ struct PostHeader {
 }
 
 fn save_sprite(
-    c: &mut Cursor<Mmap>,
+    wad: &[u8],
     sprite: &Filelump,
     palette: &[u8],
     used_colors: &mut [bool],
 ) -> Result<()> {
     let base = sprite.filepos as u64;
+    let mut c = Cursor::new(wad);
+    let c = &mut c;
     c.seek(SeekFrom::Start(base))?;
 
     let header: PatchHeader = c.read_le()?;
@@ -176,6 +179,8 @@ fn save_sprite(
 
     let mut pixels = vec![TRANSPARENT; header.width as usize * header.height as usize];
 
+    // Doom images are column major, with each column containing "posts"
+    // of pixels with a starting y coordinate. Transparent parts are skipped.
     for (x, col) in header.columnofs.iter().enumerate() {
         // trace!("      column {x}:");
         c.seek(SeekFrom::Start(base + *col as u64))?;
@@ -223,7 +228,7 @@ fn save_sprite(
     Ok(())
 }
 
-fn read_u8(c: &mut Cursor<Mmap>) -> Result<u8> {
+fn read_u8(c: &mut Cursor<&[u8]>) -> Result<u8> {
     let mut buf = [0; 1];
     c.read_exact(&mut buf)?;
     Ok(buf[0])

@@ -219,9 +219,14 @@ fn save_sprite(
     encoder.set_palette(palette);
 
     // TRNS: Everything is opaque but the TRANSPARENT color
-    let mut trns = vec![255; 255];
-    trns[TRANSPARENT as usize] = 0;
-    encoder.set_trns(&trns);
+    lazy_static::lazy_static! {
+        static ref TRNS: Vec<u8> = {
+                let mut trns = vec![255; 255];
+                trns[TRANSPARENT as usize] = 0;
+                trns
+            };
+    }
+    encoder.set_trns(&*TRNS);
 
     encoder.write_header()?.write_image_data(&pixels)?;
 

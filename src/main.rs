@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{prelude::*, Cursor, SeekFrom},
+    io::{prelude::*, BufWriter, Cursor, SeekFrom},
 };
 
 use anyhow::{bail, Context, Result};
@@ -53,6 +53,11 @@ fn doomstr(d: &[u8]) -> &str {
     std::str::from_utf8(&d[..nulterm]).expect("Non-ASCII in WAD")
 }
 
+// Determined by recording all used colors,
+// but we don't want to two-pass the whole WAD just
+// to rediscover this at runtime
+const TRANSPARENT: u8 = 251;
+
 fn go(args: Args) -> Result<()> {
     let wad_map = map_wad(&args.wad)?;
     let mut curse = Cursor::new(wad_map);
@@ -102,10 +107,10 @@ fn go(args: Args) -> Result<()> {
     let unused_color_indexes = used_colors
         .iter()
         .enumerate()
-        .filter(|(_, c)| !**c)
-        .map(|(i, _)| i)
+        .filter_map(|(i, c)| (!c).then_some(i as u8))
         .collect::<Vec<_>>();
     debug!("Unused colors: {:?}", unused_color_indexes);
+    assert!(unused_color_indexes.iter().any(|b| *b == TRANSPARENT));
 
     Ok(())
 }
@@ -133,19 +138,10 @@ fn read_directory(c: &mut Cursor<Mmap>, wi: &Wadinfo) -> Result<Vec<Filelump>> {
     Ok(lumps)
 }
 
-#[derive(BinRead, Debug)]
-struct PaletteColor {
-    r: u8,
-    g: u8,
-    b: u8,
-}
-
-fn read_palette(c: &mut Cursor<Mmap>, lump: &Filelump) -> Result<Vec<PaletteColor>> {
+fn read_palette(c: &mut Cursor<Mmap>, lump: &Filelump) -> Result<Vec<u8>> {
     c.seek(SeekFrom::Start(lump.filepos as u64))?;
-    let mut pal = Vec::with_capacity(256);
-    for _ in 0..256 {
-        pal.push(c.read_le()?);
-    }
+    let mut pal = vec![0; 256 * 3];
+    c.read_exact(&mut pal)?;
     Ok(pal)
 }
 
@@ -169,7 +165,7 @@ struct PostHeader {
 fn save_sprite(
     c: &mut Cursor<Mmap>,
     sprite: &Filelump,
-    palette: &[PaletteColor],
+    palette: &[u8],
     used_colors: &mut [bool],
 ) -> Result<()> {
     let base = sprite.filepos as u64;
@@ -178,8 +174,7 @@ fn save_sprite(
     let header: PatchHeader = c.read_le()?;
     trace!("    {header:?}");
 
-    // TODO: Glorious palette-indexed PNG
-    let mut img = image::RgbaImage::new(header.width as u32, header.height as u32);
+    let mut pixels = vec![TRANSPARENT; header.width as usize * header.height as usize];
 
     for (x, col) in header.columnofs.iter().enumerate() {
         // trace!("      column {x}:");
@@ -199,19 +194,31 @@ fn save_sprite(
             );
             */
             for dy in 0..post.length {
-                let px = read_u8(c)? as usize;
-                used_colors[px] = true;
+                let px = read_u8(c)?;
                 // trace!("          [{}] = {px}", post.topdelta + dy);
-                let pal = &palette[px];
-                let pix = [pal.r, pal.g, pal.b, 255];
-                img.put_pixel(x as u32, (post.topdelta + dy) as u32, pix.into());
+                used_colors[px as usize] = true;
+                pixels[x + (post.topdelta + dy) as usize * header.width as usize] = px;
             }
             let _pad = read_u8(c)?;
         }
     }
 
     let outname = sprite.name().to_owned() + ".png";
-    img.save(outname)?;
+    let mut encoder = png::Encoder::new(
+        BufWriter::new(fs::File::create(outname)?),
+        header.width as u32,
+        header.height as u32,
+    );
+    encoder.set_color(png::ColorType::Indexed);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_palette(palette);
+
+    // TRNS: Everything is opaque but the TRANSPARENT color
+    let mut trns = vec![255; 255];
+    trns[TRANSPARENT as usize] = 0;
+    encoder.set_trns(&trns);
+
+    encoder.write_header()?.write_image_data(&pixels)?;
 
     Ok(())
 }
